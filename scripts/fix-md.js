@@ -77,23 +77,30 @@ try {
       }
     }
 
-    // Fix paragraphs incorrectly marked as ### headings
-    if (/^###\s+[^\n]+$/.test(line) && !line.trim().endsWith('-->')) {
-      const text = line.replace(/^###\s+/, '');
+    // Fix paragraphs incorrectly marked as ## / ### / #### headings
+    if (/^#{2,4}\s+[^\n]+$/.test(line) && !line.trim().endsWith('-->')) {
+      const text = line.replace(/^#{2,4}\s+/, '');
       const trimmedText = text.trim();
 
       // Heuristics: a real heading is short, doesn't end with punctuation,
-      // doesn't start with a conjunction, and isn't a truncated sentence fragment.
+      // doesn't contain mid-sentence punctuation, doesn't start with a
+      // conjunction, and isn't a body-text fragment.
       const endsWithPunctuation = /[。！？，；：、）\}\)」』》…—\-]$/.test(trimmedText);
+      const containsClausePunct = /[，；：、]/.test(trimmedText);
+      const containsSentenceEnd = /[。！？]/.test(trimmedText);
       const isLong = trimmedText.length > 35;
-      const startsWithConjunction = /^(?:但是|然而|因此|所以|而且|不过|如果|因为|虽然|于是|接着|然后|另外|此外|当然|于是乎|事实上|基本上|换句话说)/.test(trimmedText);
-      const looksLikeBodyStart = /^[一-龥]{1,2}(?:是|在|有|会|能|可以|可能|必须|需要|应该|已经|曾经|一直|没有|不是|如同|像|就像|仿佛|似乎)/.test(trimmedText);
+      const startsWithConjunction = /^(?:但是|然而|因此|所以|而且|不过|如果|因为|虽然|于是|接着|然后|另外|此外|当然|于是乎|事实上|基本上|换句话说|对我而言|对我来讲|就|便|却|才|又|也|还|更|只|很|非常|比较|尤其|相当|特别|无论|不论|不管|除非|只要|只有|或者|还是)/.test(trimmedText);
+      const looksLikeBodyStart = /^[一-龥]{1,2}(?:是|在|有|会|能|可以|可能|必须|需要|应该|已经|曾经|一直|没有|不是|如同|像|就像|仿佛|似乎|的|对|和|与|或|而|但|来|被|把|将|从|到|向|跟|替|除了|有关|关于|至于|对于|随着|通过|经过|根据|按照|为了)/.test(trimmedText);
+      const isFragment = /^(?:[一-龥]{1,3}|[一-龥a-zA-Z]{1,3})[。！？，；：、]/.test(trimmedText);
 
       const isRealHeading = (
         !isLong &&
         !endsWithPunctuation &&
+        !containsClausePunct &&
+        !containsSentenceEnd &&
         !startsWithConjunction &&
         !looksLikeBodyStart &&
+        !isFragment &&
         /^[#一-龥a-zA-Z0-9\s\-–—""''·，。！？：；（）【】《》「」『』、·％＋－—…]+$/.test(trimmedText) &&
         !/\.{3,}/.test(trimmedText) &&
         !/\d+\s*$/.test(trimmedText)
