@@ -199,41 +199,47 @@ function fixMiddleDot(content) {
 }
 
 /**
- * Promote short standalone topic lines to #### headings.
- * e.g. "水星─金星" → "#### 水星─金星", "月亮与四交点" → "#### 月亮与四交点"
+ * Promote planet-pair topic lines to #### headings.
+ * e.g. "太阳─土星 自我否定。自律。..." → "#### 太阳─土星\n\n自我否定。自律。..."
+ *      "水星─金星" → "#### 水星─金星"
+ *      "月亮与四交点" → "#### 月亮与四交点"
+ *
+ * The pattern is: [PlanetA]─[PlanetB] [optional keyword traits]
+ * The planet-pair part becomes a heading, the rest stays as body text.
  */
 function promoteTopicHeadings(content) {
   const blocks = content.split('\n\n');
   let promoted = 0;
 
   const isHeading = (line) => /^#{1,4}\s/.test(line);
-  const looksLikeTopic = (line) => {
-    const t = line.trim();
-    if (t.length < 3 || t.length > 30) return false;
-    if (isHeading(t)) return false;
-    // Not a sentence or keyword list (no 。，、的)
-    if (/[。，、的]/.test(t)) return false;
-    // Not ending with common body text endings
-    if (/[。！？，；：、）\}\)」』》]$/.test(t)) return false;
-    // Planet/phase pairs: 太阳-火星, 水星─金星, 月亮与四交点
-    if (/^[一-龥]{2,6}[─\-–—与和·][一-龥]{2,8}$/.test(t)) return true;
-    // Phase names: 四分相, 六分相, 十二分之五相, 半六分相
-    if (/^(?:合相|对分相|三分相|四分相|六分相|五分相|半六分相|半四分相|八分之三相|十二分之五相|双重五分相)$/.test(t)) return true;
-    // Element/mode lists: 火元素 土元素 ..., 主要星座 白羊座 ...
-    if (/^(?:火元素|土元素|风元素|水元素|主要星座|固定星座|变动星座)(?:\s+[一-龥]+)+$/.test(t)) return true;
-    // Short subtopic markers: 找出相位, 容许度, 入相位与出相位
-    if (/^(?:找出相位|容许度|入相位与出相位|斟酌轻重)$/.test(t)) return true;
-    // Planet + 与四交点 pattern
-    if (/^[一-龥]{2,4}与四交点$/.test(t)) return true;
-    return false;
-  };
+
+  // Planet-pair prefix: 太阳─土星, 水星──冥王星, 月亮-火星, 狮子——水瓶座
+  const planetPairRE = /^([一-龥]{2,6}[─\-–—]{1,3}[一-龥]{2,8})(?:\s+(.+))?$/;
 
   for (let i = 0; i < blocks.length; i++) {
     const lines = blocks[i].split('\n');
-    if (lines.length === 1 && !isHeading(lines[0]) && looksLikeTopic(lines[0])) {
-      blocks[i] = '#### ' + lines[0].trim();
-      promoted++;
+    if (lines.length !== 1) continue;
+    const line = lines[0].trim();
+    if (isHeading(line)) continue;
+
+    const m = line.match(planetPairRE);
+    if (!m) continue;
+
+    const heading = m[1];    // e.g. "太阳─土星"
+    const body    = m[2];    // e.g. "自我否定。自律。自制。..." or undefined
+
+    // Skip if the line looks like a regular sentence with just a dash
+    // e.g. "月亮和银有关——包括色彩..." is body text, not a topic
+    if (/^.{0,5}(?:有关|相关|代表|象征|意味|方面|包括|涉及|关于)/.test(body || '')) continue;
+    // Skip if the heading part is too long (likely a sentence)
+    if (heading.length > 20) continue;
+
+    if (body) {
+      blocks[i] = '#### ' + heading + '\n\n' + body;
+    } else {
+      blocks[i] = '#### ' + heading;
     }
+    promoted++;
   }
 
   return { content: blocks.join('\n\n'), promoted };
