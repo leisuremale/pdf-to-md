@@ -8,11 +8,15 @@
  * JSON config fields:
  *   pdf              (required)  Path to the PDF file
  *   output           (required)  Path for the output .md file
+ *   converter        (optional)  "pdf2md" (default) or "ocr" (tesseract)
+ *                                "auto" = try pdf2md, fall back to ocr if empty
  *   fix              (optional)  Run fix-md after conversion?       default: true
  *   removePageBreaks (optional)  Remove <!-- PAGE_BREAK --> tags?   default: true
+ *   joinParagraphs   (optional)  Join broken lines into paragraphs?  default: true
  *
  * Example:
  *   node pipeline.js '{"pdf":"/path/to/book.pdf","output":"/path/to/book.md"}'
+ *   node pipeline.js '{"pdf":"/path/to/scanned.pdf","output":"/path/to/out.md","converter":"ocr"}'
  *
  * Output: always a single line of JSON to stdout.
  */
@@ -20,6 +24,7 @@
 import { readFileSync, writeFileSync } from 'fs';
 import { resolve, dirname } from 'path';
 import { fileURLToPath } from 'url';
+import { execSync } from 'child_process';
 
 // ── Parse config ────────────────────────────────────────────────────────────
 
@@ -33,11 +38,12 @@ try {
   process.exit(1);
 }
 
-const pdfPath  = config.pdf;
-const outPath  = config.output;
-const doFix    = config.fix !== false;            // default true
-const rmBreaks = config.removePageBreaks !== false; // default true
-const doJoin   = config.joinParagraphs !== false;   // default true
+const pdfPath    = config.pdf;
+const outPath    = config.output;
+const converter  = config.converter || 'auto';     // "pdf2md" | "marker" | "auto"
+const doFix      = config.fix !== false;            // default true
+const rmBreaks   = config.removePageBreaks !== false; // default true
+const doJoin     = config.joinParagraphs !== false;   // default true
 
 if (!pdfPath || !outPath) {
   console.log(JSON.stringify({ ok: false, error: 'Missing required fields: pdf, output' }));
@@ -250,18 +256,59 @@ function promoteTopicHeadings(content) {
 try {
   const startedAt = Date.now();
 
-  // Step 1: Convert PDF → Markdown
-  const pdf2md = (await loadModule('./node_modules/@opendocsg/pdf2md/lib/pdf2md.js')).default;
-  const pdfBuffer = readFileSync(pdfPath);
-  let markdown = await pdf2md(pdfBuffer);
+  // ── Step 1: Convert PDF → Markdown ──────────────────────────────────────
+  let markdown;
+  let converterUsed;
+  let convertStats;
 
-  const convertStats = {
-    inputSize: pdfBuffer.length,
-    outputLength: markdown.length,
-    lineCount: markdown.split('\n').length,
+  const runPdf2md = async () => {
+    const pdf2md = (await loadModule('./node_modules/@opendocsg/pdf2md/lib/pdf2md.js')).default;
+    const pdfBuffer = readFileSync(pdfPath);
+    const md = await pdf2md(pdfBuffer);
+    return { markdown: md, inputSize: pdfBuffer.length };
   };
 
-  // Step 2: Fix markdown (optional)
+  const runOcr = () => {
+    const ocrScript = resolve(__dirname, 'ocr.py');
+    const pythonBin = '/usr/bin/python3';
+    const result = execSync(`"${pythonBin}" "${ocrScript}" "${pdfPath}" chi_sim+eng`, {
+      stdio: 'pipe',
+      timeout: 600000,
+      encoding: 'utf8',
+    });
+    const parsed = JSON.parse(result.trim());
+    if (!parsed.ok) throw new Error(parsed.error || 'OCR failed');
+    return { markdown: parsed.text, inputSize: readFileSync(pdfPath).length };
+  };
+
+  // Determine which converter to use
+  if (converter === 'ocr') {
+    const r = runOcr();
+    markdown = r.markdown;
+    converterUsed = 'ocr';
+    convertStats = { inputSize: r.inputSize, outputLength: markdown.length, lineCount: markdown.split('\n').length };
+  } else if (converter === 'pdf2md') {
+    const r = await runPdf2md();
+    markdown = r.markdown;
+    converterUsed = 'pdf2md';
+    convertStats = { inputSize: r.inputSize, outputLength: markdown.length, lineCount: markdown.split('\n').length };
+  } else {
+    // auto: try pdf2md first, fall back to OCR if empty
+    const r = await runPdf2md();
+    markdown = r.markdown;
+    convertStats = { inputSize: r.inputSize, outputLength: markdown.length, lineCount: markdown.split('\n').length };
+    if (!markdown.trim()) {
+      console.error('[pipeline] pdf2md returned empty output, falling back to OCR...');
+      const r2 = runOcr();
+      markdown = r2.markdown;
+      converterUsed = 'ocr (fallback)';
+      convertStats = { inputSize: r2.inputSize, outputLength: markdown.length, lineCount: markdown.split('\n').length };
+    } else {
+      converterUsed = 'pdf2md';
+    }
+  }
+
+  // ── Step 2: Fix markdown (optional) ─────────────────────────────────────
   let fixStats = null;
   if (doFix) {
     const result = fixMarkdown(markdown, rmBreaks);
@@ -298,6 +345,7 @@ try {
   console.log(JSON.stringify({
     ok: true,
     outputPath: outPath,
+    converter: converterUsed,
     convert: convertStats,
     fix: fixStats,
     join: joinStats,
