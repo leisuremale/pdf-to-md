@@ -185,6 +185,60 @@ function joinParagraphs(content) {
   return { content: out.join('\n\n'), joinedCount };
 }
 
+/**
+ * Fix garbled middle-dot in foreign names.
+ * PDF converters often render · (U+00B7) as ? between CJK characters.
+ */
+function fixMiddleDot(content) {
+  let count = 0;
+  const fixed = content.replace(/([一-龥A-Za-z])\?\s*([一-龥A-Za-z])/g, (_, a, b) => {
+    count++;
+    return a + '·' + b;
+  });
+  return { content: fixed, fixedCount: count };
+}
+
+/**
+ * Promote short standalone topic lines to #### headings.
+ * e.g. "水星─金星" → "#### 水星─金星", "月亮与四交点" → "#### 月亮与四交点"
+ */
+function promoteTopicHeadings(content) {
+  const blocks = content.split('\n\n');
+  let promoted = 0;
+
+  const isHeading = (line) => /^#{1,4}\s/.test(line);
+  const looksLikeTopic = (line) => {
+    const t = line.trim();
+    if (t.length < 3 || t.length > 30) return false;
+    if (isHeading(t)) return false;
+    // Not a sentence or keyword list (no 。，、的)
+    if (/[。，、的]/.test(t)) return false;
+    // Not ending with common body text endings
+    if (/[。！？，；：、）\}\)」』》]$/.test(t)) return false;
+    // Planet/phase pairs: 太阳-火星, 水星─金星, 月亮与四交点
+    if (/^[一-龥]{2,6}[─\-–—与和·][一-龥]{2,8}$/.test(t)) return true;
+    // Phase names: 四分相, 六分相, 十二分之五相, 半六分相
+    if (/^(?:合相|对分相|三分相|四分相|六分相|五分相|半六分相|半四分相|八分之三相|十二分之五相|双重五分相)$/.test(t)) return true;
+    // Element/mode lists: 火元素 土元素 ..., 主要星座 白羊座 ...
+    if (/^(?:火元素|土元素|风元素|水元素|主要星座|固定星座|变动星座)(?:\s+[一-龥]+)+$/.test(t)) return true;
+    // Short subtopic markers: 找出相位, 容许度, 入相位与出相位
+    if (/^(?:找出相位|容许度|入相位与出相位|斟酌轻重)$/.test(t)) return true;
+    // Planet + 与四交点 pattern
+    if (/^[一-龥]{2,4}与四交点$/.test(t)) return true;
+    return false;
+  };
+
+  for (let i = 0; i < blocks.length; i++) {
+    const lines = blocks[i].split('\n');
+    if (lines.length === 1 && !isHeading(lines[0]) && looksLikeTopic(lines[0])) {
+      blocks[i] = '#### ' + lines[0].trim();
+      promoted++;
+    }
+  }
+
+  return { content: blocks.join('\n\n'), promoted };
+}
+
 // ── Main pipeline ───────────────────────────────────────────────────────────
 
 try {
@@ -221,7 +275,17 @@ try {
     joinStats = { linesJoined: result.joinedCount };
   }
 
-  // Step 4: Write output
+  // Step 4: Fix garbled middle-dot (? → · in foreign names)
+  const dotResult = fixMiddleDot(markdown);
+  markdown = dotResult.content;
+  const dotStats = { middleDotsFixed: dotResult.fixedCount };
+
+  // Step 5: Promote standalone topic lines to #### headings
+  const topicResult = promoteTopicHeadings(markdown);
+  markdown = topicResult.content;
+  const topicStats = { topicsPromoted: topicResult.promoted };
+
+  // Step 6: Write output
   writeFileSync(outPath, markdown, 'utf8');
 
   const ms = Date.now() - startedAt;
@@ -231,6 +295,7 @@ try {
     convert: convertStats,
     fix: fixStats,
     join: joinStats,
+    polish: { ...dotStats, ...topicStats },
     durationMs: ms,
   }));
 } catch (err) {
