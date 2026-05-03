@@ -9,7 +9,7 @@ Most PDF-to-Markdown tools force you through a multi-step mess: run a converter,
 **pdf-to-md collapses the entire pipeline into one JSON-in / JSON-out call.**
 
 ```
-Before:  convert.js → read output → fix-md.js → read output → strip tags → done
+Before:  convert → inspect → fix headings → strip tags → join paragraphs → done
 After:   pipeline.js '{"pdf":"...","output":"..."}' → done
 ```
 
