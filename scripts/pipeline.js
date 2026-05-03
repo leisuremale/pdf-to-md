@@ -37,6 +37,7 @@ const pdfPath  = config.pdf;
 const outPath  = config.output;
 const doFix    = config.fix !== false;            // default true
 const rmBreaks = config.removePageBreaks !== false; // default true
+const doJoin   = config.joinParagraphs !== false;   // default true
 
 if (!pdfPath || !outPath) {
   console.log(JSON.stringify({ ok: false, error: 'Missing required fields: pdf, output' }));
@@ -135,6 +136,55 @@ function fixMarkdown(content, removePageBreaks) {
   return { content: fixed.join('\n'), fixedCount, pageBreaksRemoved };
 }
 
+/**
+ * Join broken lines back into paragraphs.
+ * PDF converters insert a blank line between every line, so we can't use
+ * blank lines to detect paragraph boundaries. Instead we use content rules:
+ * a line ending with CJK sentence-ending punctuation marks a paragraph end;
+ * otherwise the next line is a continuation and should be joined.
+ */
+function joinParagraphs(content) {
+  // Strip all blank lines first — they're artifacts from the PDF converter
+  const rawLines = content.split('\n').filter(l => l.trim() !== '');
+  const out = [];
+  let buf = '';
+  let joinedCount = 0;
+
+  const isHeading = (line) => /^#{1,4}\s/.test(line.trim());
+  const isSentenceEnd = (line) => /[。！？」』》\)]$/.test(line.trim());
+
+  for (let i = 0; i < rawLines.length; i++) {
+    const line = rawLines[i];
+
+    // Headings always stand alone
+    if (isHeading(line)) {
+      if (buf) { out.push(buf.trimEnd()); buf = ''; joinedCount++; }
+      out.push(line);
+      continue;
+    }
+
+    // Accumulate body text
+    if (buf) {
+      buf += line;  // join without space (CJK text has no inter-word spaces)
+    } else {
+      buf = line;
+    }
+
+    // End of paragraph? (sentence-ending punctuation, or next line is a heading)
+    const nextIsHeading = i + 1 < rawLines.length && isHeading(rawLines[i + 1]);
+    if (isSentenceEnd(line) || nextIsHeading) {
+      out.push(buf.trimEnd());
+      buf = '';
+      if (nextIsHeading && !isSentenceEnd(line)) joinedCount++;
+    } else {
+      joinedCount++;
+    }
+  }
+  if (buf) { out.push(buf.trimEnd()); }
+
+  return { content: out.join('\n\n'), joinedCount };
+}
+
 // ── Main pipeline ───────────────────────────────────────────────────────────
 
 try {
@@ -163,7 +213,15 @@ try {
     };
   }
 
-  // Step 3: Write output
+  // Step 3: Join broken paragraphs (optional)
+  let joinStats = null;
+  if (doJoin) {
+    const result = joinParagraphs(markdown);
+    markdown = result.content;
+    joinStats = { linesJoined: result.joinedCount };
+  }
+
+  // Step 4: Write output
   writeFileSync(outPath, markdown, 'utf8');
 
   const ms = Date.now() - startedAt;
@@ -172,6 +230,7 @@ try {
     outputPath: outPath,
     convert: convertStats,
     fix: fixStats,
+    join: joinStats,
     durationMs: ms,
   }));
 } catch (err) {
