@@ -40,7 +40,8 @@ try {
 
 const pdfPath    = config.pdf;
 const outPath    = config.output;
-const converter  = config.converter || 'auto';     // "pdf2md" | "marker" | "auto"
+const converter  = config.converter || 'auto';     // "pdf2md" | "ocr" | "auto"
+const lang       = config.lang || 'auto';           // "zh" | "en" | "auto"
 const doFix      = config.fix !== false;            // default true
 const rmBreaks   = config.removePageBreaks !== false; // default true
 const doJoin     = config.joinParagraphs !== false;   // default true
@@ -50,18 +51,28 @@ if (!pdfPath || !outPath) {
   process.exit(1);
 }
 
+// ── Language detection ────────────────────────────────────────────────────
+
+function detectLang(text) {
+  const cjkCount = (text.match(/[一-鿿]/g) || []).length;
+  const total = text.replace(/\s/g, '').length;
+  return (total > 0 && cjkCount / total > 0.3) ? 'zh' : 'en';
+}
+
 // ── Helpers ─────────────────────────────────────────────────────────────────
 
 function loadModule(relativePath) {
   return import(resolve(__dirname, relativePath));
 }
 
-// Inline fix-md logic so we don't need to shell out
-function makeSlug(text) {
+function makeSlug(text, lang) {
+  if (lang === 'en') {
+    return text.toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-|-$/g, '');
+  }
   return text.toLowerCase().replace(/[^一-龥a-z0-9]+/g, '-').replace(/^-|-$/g, '');
 }
 
-function fixMarkdown(content, removePageBreaks) {
+function fixMarkdown(content, removePageBreaks, lang) {
   const lines = content.split('\n');
   const fixed = [];
   let fixedCount = 0;
@@ -96,7 +107,7 @@ function fixMarkdown(content, removePageBreaks) {
         if (m) {
           let title = m[1].trim();
           title = title.replace(/^目\s+录\s*/, '');
-          fixed.push(`- [${title}](#${makeSlug(title)})`);
+          fixed.push(`- [${title}](#${makeSlug(title, lang)})`);
           fixedCount++;
           continue;
         }
@@ -149,7 +160,8 @@ function fixMarkdown(content, removePageBreaks) {
  * a line ending with CJK sentence-ending punctuation marks a paragraph end;
  * otherwise the next line is a continuation and should be joined.
  */
-function joinParagraphs(content) {
+function joinParagraphs(content, lang) {
+  const sentenceEndRE = lang === 'en' ? /[.!?)"']$/ : /[。！？」』》\)]$/;
   // Strip all blank lines first — they're artifacts from the PDF converter
   const rawLines = content.split('\n').filter(l => l.trim() !== '');
   const out = [];
@@ -157,7 +169,7 @@ function joinParagraphs(content) {
   let joinedCount = 0;
 
   const isHeading = (line) => /^#{1,4}\s/.test(line.trim());
-  const isSentenceEnd = (line) => /[。！？」』》\)]$/.test(line.trim());
+  const isSentenceEnd = (line) => sentenceEndRE.test(line.trim());
 
   for (let i = 0; i < rawLines.length; i++) {
     const line = rawLines[i];
@@ -195,7 +207,8 @@ function joinParagraphs(content) {
  * Fix garbled middle-dot in foreign names.
  * PDF converters often render · (U+00B7) as ? between CJK characters.
  */
-function fixMiddleDot(content) {
+function fixMiddleDot(content, lang) {
+  if (lang === 'en') return { content, fixedCount: 0 };
   let count = 0;
   const fixed = content.replace(/([一-龥A-Za-z])\?\s*([一-龥A-Za-z])/g, (_, a, b) => {
     count++;
@@ -213,7 +226,8 @@ function fixMiddleDot(content) {
  * The pattern is: [PlanetA]─[PlanetB] [optional keyword traits]
  * The planet-pair part becomes a heading, the rest stays as body text.
  */
-function promoteTopicHeadings(content) {
+function promoteTopicHeadings(content, lang) {
+  if (lang === 'en') return { content, promoted: 0 };
   const blocks = content.split('\n\n');
   let promoted = 0;
 
@@ -308,10 +322,13 @@ try {
     }
   }
 
+
+  // ── Determine language
+  const detectedLang = lang === 'auto' ? detectLang(markdown) : lang;
   // ── Step 2: Fix markdown (optional) ─────────────────────────────────────
   let fixStats = null;
   if (doFix) {
-    const result = fixMarkdown(markdown, rmBreaks);
+    const result = fixMarkdown(markdown, rmBreaks, detectedLang);
     markdown = result.content;
     fixStats = {
       totalLines: convertStats.lineCount,
@@ -323,18 +340,18 @@ try {
   // Step 3: Join broken paragraphs (optional)
   let joinStats = null;
   if (doJoin) {
-    const result = joinParagraphs(markdown);
+    const result = joinParagraphs(markdown, detectedLang);
     markdown = result.content;
     joinStats = { linesJoined: result.joinedCount };
   }
 
   // Step 4: Fix garbled middle-dot (? → · in foreign names)
-  const dotResult = fixMiddleDot(markdown);
+  const dotResult = fixMiddleDot(markdown, detectedLang);
   markdown = dotResult.content;
   const dotStats = { middleDotsFixed: dotResult.fixedCount };
 
   // Step 5: Promote standalone topic lines to #### headings
-  const topicResult = promoteTopicHeadings(markdown);
+  const topicResult = promoteTopicHeadings(markdown, detectedLang);
   markdown = topicResult.content;
   const topicStats = { topicsPromoted: topicResult.promoted };
 
@@ -344,6 +361,7 @@ try {
   const ms = Date.now() - startedAt;
   console.log(JSON.stringify({
     ok: true,
+    lang: detectedLang,
     outputPath: outPath,
     converter: converterUsed,
     convert: convertStats,
