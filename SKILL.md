@@ -36,6 +36,14 @@ node pipeline.js '{"pdf":"/path/to/scanned.pdf","output":"/path/to/out.md","conv
 | `ocr` | tesseract + chi_sim | 扫描/图片 PDF | 按页 OCR（449页~10分钟） |
 | `auto`（默认） | pdf2md → 空则降级 ocr | 通用 | 自动检测 |
 
+## 管道步骤
+
+```
+convert → fix headings → join paragraphs → remove CJK spaces → fix middle-dot → promote topics → write
+```
+
+**remove CJK spaces**：PDF 提取文本时常在中文之间插入空格（如 `我 们 对 自 己`），该步骤自动移除两中文字间的多余空格，不影响英文词间距和中英文混合排版。
+
 ## 安装
 
 ```bash
