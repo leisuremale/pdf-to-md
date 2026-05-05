@@ -204,6 +204,32 @@ function joinParagraphs(content, lang) {
 }
 
 /**
+ * Remove extraneous single spaces between CJK characters.
+ * PDF text extraction often inserts a space between every CJK character,
+ * e.g. "我 们 对 自 己 的 身 份 认 同" → "我们对自己的身份认同".
+ * Only removes spaces where both neighbors are CJK characters, preserving:
+ * - English word spacing (hello world)
+ * - Chinese-English spacing (AI 技术)
+ * - Code blocks, tables, etc.
+ */
+function removeCJKSpaces(content, lang) {
+  if (lang === 'en') return { content, removed: 0 };
+  let removed = 0;
+  // Match any CJK-range character: ideographs + punctuation + fullwidth forms
+  // U+4E00–U+9FFF  CJK Unified Ideographs  (一–鿿)
+  // U+3400–U+4DBF  CJK Extension A        (㐀–䶿)
+  // U+3000–U+303F  CJK Symbols/Punctuation (、。「」etc)
+  // U+FF00–U+FFEF  Halfwidth/Fullwidth     (，。！？etc)
+  const cjk = '[\\u4e00-\\u9fff\\u3400-\\u4dbf\\u3000-\\u303f\\uff00-\\uffef]';
+  const re = new RegExp(`(${cjk})\\s+(${cjk})`, 'g');
+  const fixed = content.replace(re, (match, a, b) => {
+    removed++;
+    return a + b;
+  });
+  return { content: fixed, removed };
+}
+
+/**
  * Fix garbled middle-dot in foreign names.
  * PDF converters often render · (U+00B7) as ? between CJK characters.
  */
@@ -345,17 +371,22 @@ try {
     joinStats = { linesJoined: result.joinedCount };
   }
 
-  // Step 4: Fix garbled middle-dot (? → · in foreign names)
+  // Step 4: Remove extraneous spaces between CJK characters (PDF artifact)
+  const spaceResult = removeCJKSpaces(markdown, detectedLang);
+  markdown = spaceResult.content;
+  const spaceStats = { cjkSpacesRemoved: spaceResult.removed };
+
+  // Step 5: Fix garbled middle-dot (? → · in foreign names)
   const dotResult = fixMiddleDot(markdown, detectedLang);
   markdown = dotResult.content;
   const dotStats = { middleDotsFixed: dotResult.fixedCount };
 
-  // Step 5: Promote standalone topic lines to #### headings
+  // Step 6: Promote standalone topic lines to #### headings
   const topicResult = promoteTopicHeadings(markdown, detectedLang);
   markdown = topicResult.content;
   const topicStats = { topicsPromoted: topicResult.promoted };
 
-  // Step 6: Write output
+  // Step 7: Write output
   writeFileSync(outPath, markdown, 'utf8');
 
   const ms = Date.now() - startedAt;
@@ -367,7 +398,7 @@ try {
     convert: convertStats,
     fix: fixStats,
     join: joinStats,
-    polish: { ...dotStats, ...topicStats },
+    polish: { ...spaceStats, ...dotStats, ...topicStats },
     durationMs: ms,
   }));
 } catch (err) {
