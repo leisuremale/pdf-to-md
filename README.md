@@ -46,7 +46,7 @@ node pipeline.js '{"pdf":"scanned.pdf","output":"out.md","converter":"ocr"}'
 ## Complete pipeline
 
 ```
-convert → fix headings → join paragraphs → fix middle-dot → promote topics → write
+convert → fix headings → join paragraphs → remove CJK spaces → fix middle-dot → promote topics → write
 ```
 
 One JSON in, full stats out:
@@ -59,9 +59,21 @@ One JSON in, full stats out:
   "convert": { "inputSize": 51657593, "outputLength": 323732, "lineCount": 14725 },
   "fix": { "fixedLines": 6225, "pageBreaksRemoved": 252 },
   "join": { "linesJoined": 5095 },
-  "polish": { "middleDotsFixed": 132, "topicsPromoted": 43 },
+  "polish": { "cjkSpacesRemoved": 18420, "middleDotsFixed": 132, "topicsPromoted": 43 },
   "durationMs": 1442
 }
+```
+
+### 🔥 Remove CJK spaces
+
+PDF text extraction often inserts a space between every CJK character:
+
+```
+Before:  我 们 对 自 己 的 身 份 认 同
+After:   我们对自己的身份认同
+```
+
+The regex `([一-鿿])\s+([一-鿿])` only removes spaces where **both neighbors are CJK characters**, preserving English word spacing and Chinese-English mixed layout.
 ```
 
 ## JSON config
