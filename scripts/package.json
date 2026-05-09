@@ -1,15 +1,28 @@
 {
-  "name": "scripts",
+  "name": "pdf-to-md",
   "version": "1.0.0",
-  "description": "",
-  "main": "convert.js",
-  "scripts": {
-    "test": "echo \"Error: no test specified\" && exit 1"
+  "description": "JSON-driven PDF → clean Markdown. Dual engine: text extraction + OCR.",
+  "main": "pipeline.js",
+  "bin": {
+    "pdf-to-md": "pipeline.js"
   },
-  "keywords": [],
-  "author": "",
   "type": "module",
-  "license": "ISC",
+  "files": [
+    "pipeline.js",
+    "ocr.py",
+    "lib/"
+  ],
+  "engines": {
+    "node": ">=18"
+  },
+  "scripts": {
+    "test": "node --test test/cjk.test.mjs test/fix.test.mjs test/join.test.mjs test/convert.test.mjs test/pipeline.test.mjs"
+  },
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/leisuremale/pdf-to-md.git"
+  },
   "dependencies": {
     "@opendocsg/pdf2md": "^0.2.6"
   }

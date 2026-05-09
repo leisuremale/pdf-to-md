@@ -1,0 +1,20 @@
+{
+  "$comment": "Body-text patterns for the heading-demotion heuristic. Override via config.heuristicsPath. Patterns are JS regex source (no flags, no anchors — anchoring/case-sensitivity baked in by fix.js).",
+  "bodyConjunctions": [
+    "但是", "然而", "因此", "所以", "而且", "不过", "如果", "因为", "虽然",
+    "于是", "接着", "然后", "另外", "此外", "当然", "于是乎", "事实上", "基本上",
+    "换句话说", "对我而言", "对我来讲",
+    "无论", "不论", "不管", "除非", "只要", "只有", "或者", "还是",
+    "尤其是", "特别是", "比方说", "举例来说"
+  ],
+  "$comment_bodyVerbSuffixes": "Strong body-text signals only. Pure particles (的/对/和/与/或/而/但/来) and prepositions (从/到/向/跟) appear in legit headings (e.g. '更高的视角', '从生到死') and were removed to avoid false demotion.",
+  "bodyVerbSuffixes": [
+    "是", "在", "有", "会", "能", "可以", "可能", "必须", "需要", "应该",
+    "已经", "曾经", "一直", "没有", "不是", "如同", "就像", "仿佛", "似乎",
+    "被", "把", "将",
+    "除了", "有关", "至于", "随着", "通过", "经过", "根据", "按照", "为了"
+  ],
+  "topicBodySkip": [
+    "有关", "相关", "代表", "象征", "意味", "方面", "包括", "涉及", "关于"
+  ]
+}

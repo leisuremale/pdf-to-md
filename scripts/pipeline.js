@@ -4,402 +4,226 @@
  *
  * Usage:
  *   node pipeline.js '<json-config>'
+ *   node pipeline.js --config <file.json>
+ *   node pipeline.js --config=<file.json>
+ *   node pipeline.js [--dry-run] [--quiet] '<json>'   # CLI flags can come before/after config
  *
  * JSON config fields:
  *   pdf              (required)  Path to the PDF file
  *   output           (required)  Path for the output .md file
- *   converter        (optional)  "pdf2md" (default) or "ocr" (tesseract)
- *                                "auto" = try pdf2md, fall back to ocr if empty
- *   fix              (optional)  Run fix-md after conversion?       default: true
- *   removePageBreaks (optional)  Remove <!-- PAGE_BREAK --> tags?   default: true
+ *   converter        (optional)  "pdf2md" / "ocr" / "auto"           default: "auto"
+ *   lang             (optional)  "zh" / "en" / "auto"                default: "auto"
+ *   pythonBin        (optional)  Python interpreter path for OCR     default: platform-specific
+ *   ocrDpi           (optional)  Render DPI for OCR (300 recommended for CJK)
+ *   ocrWorkers       (optional)  Parallel OCR workers                default: cpu_count - 1
+ *   ocrCache         (optional)  Per-page OCR cache: true/false/<dir> default: true
+ *   fix              (optional)  Run heading/TOC fix engine?         default: true
+ *   removePageBreaks (optional)  Remove <!-- PAGE_BREAK --> tags?    default: true (when pageBreakStyle="remove")
+ *   pageBreakStyle   (optional)  "remove" / "number" / "keep"        default: "remove"
+ *                                "number" rewrites markers to <!-- p:N --> for LLM citation
+ *   nestedToc        (optional)  Emit nested chapter→section list    default: false
+ *   heuristicsPath   (optional)  Override path to heuristics.json
  *   joinParagraphs   (optional)  Join broken lines into paragraphs?  default: true
+ *   dryRun           (optional)  Preview only — don't write output   default: false
  *
  * Example:
  *   node pipeline.js '{"pdf":"/path/to/book.pdf","output":"/path/to/book.md"}'
- *   node pipeline.js '{"pdf":"/path/to/scanned.pdf","output":"/path/to/out.md","converter":"ocr"}'
+ *   node pipeline.js --config job.json
+ *   node pipeline.js --dry-run '{"pdf":"...","output":"..."}'
  *
  * Output: always a single line of JSON to stdout.
  */
 
-import { readFileSync, writeFileSync } from 'fs';
-import { resolve, dirname } from 'path';
-import { fileURLToPath } from 'url';
-import { execSync } from 'child_process';
+import { writeFileSync, readFileSync } from 'fs';
+import { runPdf2md, runOcr } from './lib/convert.js';
+import { detectLang, removeCJKSpaces, fixMiddleDot } from './lib/cjk.js';
+import { processPageBreaks, fixMarkdown, promoteTopicHeadings } from './lib/fix.js';
+import { joinParagraphs } from './lib/join.js';
 
-// ── Parse config ────────────────────────────────────────────────────────────
+// ── Parse argv ──────────────────────────────────────────────────────────────
+function parseArgv(argv) {
+  const args = argv.slice(2);
+  const flags = { dryRun: false, quiet: false };
+  let configSource = null; // either { kind: 'inline', json: '...' } or { kind: 'file', path: '...' }
 
-const __dirname = dirname(fileURLToPath(import.meta.url));
+  for (let i = 0; i < args.length; i++) {
+    const a = args[i];
+    if (a === '--dry-run') { flags.dryRun = true; continue; }
+    if (a === '--quiet')   { flags.quiet = true;  continue; }
+    if (a === '--config')  { configSource = { kind: 'file', path: args[++i] }; continue; }
+    if (a.startsWith('--config=')) { configSource = { kind: 'file', path: a.slice('--config='.length) }; continue; }
+    if (a.startsWith('--')) {
+      throw new Error(`Unknown flag: ${a}`);
+    }
+    // First positional is inline JSON
+    if (!configSource) configSource = { kind: 'inline', json: a };
+  }
 
-let config;
+  let config = {};
+  if (configSource?.kind === 'file') {
+    if (!configSource.path) throw new Error('--config requires a file path');
+    config = JSON.parse(readFileSync(configSource.path, 'utf8'));
+  } else if (configSource?.kind === 'inline') {
+    config = JSON.parse(configSource.json || '{}');
+  }
+  return { config, flags };
+}
+
+let config, flags;
 try {
-  config = JSON.parse(process.argv[2] || '{}');
-} catch {
-  console.log(JSON.stringify({ ok: false, error: 'Invalid JSON config. Usage: node pipeline.js \'{"pdf":"...","output":"..."}\'' }));
+  ({ config, flags } = parseArgv(process.argv));
+} catch (e) {
+  console.log(JSON.stringify({ ok: false, error: `Invalid CLI args: ${e.message}` }));
   process.exit(1);
 }
 
-const pdfPath    = config.pdf;
-const outPath    = config.output;
-const converter  = config.converter || 'auto';     // "pdf2md" | "ocr" | "auto"
-const lang       = config.lang || 'auto';           // "zh" | "en" | "auto"
-const doFix      = config.fix !== false;            // default true
-const rmBreaks   = config.removePageBreaks !== false; // default true
-const doJoin     = config.joinParagraphs !== false;   // default true
+const log = flags.quiet ? () => {} : (msg) => console.error(`[pipeline] ${msg}`);
+
+const pdfPath        = config.pdf;
+const outPath        = config.output;
+const converter      = config.converter || 'auto';
+const langArg        = config.lang || 'auto';
+const pythonBin      = config.pythonBin;
+const ocrDpi         = config.ocrDpi;
+const ocrWorkers     = config.ocrWorkers;
+const ocrCache       = config.ocrCache !== false; // default true; can be path string
+const doFix          = config.fix !== false;
+const rmBreaks       = config.removePageBreaks !== false;
+const pageBreakStyle = config.pageBreakStyle || (rmBreaks ? 'remove' : 'keep');
+const nestedToc      = config.nestedToc === true;
+const heuristicsPath = config.heuristicsPath;
+const doJoin         = config.joinParagraphs !== false;
+const dryRun         = flags.dryRun || config.dryRun === true;
+
+const ocrOpts = { pythonBin, dpi: ocrDpi, workers: ocrWorkers, cache: ocrCache, pdfPath };
 
 if (!pdfPath || !outPath) {
   console.log(JSON.stringify({ ok: false, error: 'Missing required fields: pdf, output' }));
   process.exit(1);
 }
 
-// ── Language detection ────────────────────────────────────────────────────
-
-function detectLang(text) {
-  const cjkCount = (text.match(/[一-鿿]/g) || []).length;
-  const total = text.replace(/\s/g, '').length;
-  return (total > 0 && cjkCount / total > 0.3) ? 'zh' : 'en';
-}
-
 // ── Helpers ─────────────────────────────────────────────────────────────────
+const statsFor = (markdown, inputSize) => ({
+  inputSize,
+  outputLength: markdown.length,
+  lineCount: markdown.split('\n').length,
+});
 
-function loadModule(relativePath) {
-  return import(resolve(__dirname, relativePath));
-}
-
-function makeSlug(text, lang) {
-  if (lang === 'en') {
-    return text.toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-|-$/g, '');
-  }
-  return text.toLowerCase().replace(/[^一-龥a-z0-9]+/g, '-').replace(/^-|-$/g, '');
-}
-
-function fixMarkdown(content, removePageBreaks, lang) {
-  const lines = content.split('\n');
-  const fixed = [];
-  let fixedCount = 0;
-  let pageBreaksRemoved = 0;
-
-  for (const line of lines) {
-    if (line.trim() === '<!-- PAGE_BREAK -->') {
-      if (removePageBreaks) { pageBreaksRemoved++; continue; }
-      fixed.push(line);
-      continue;
-    }
-
-    const trimmed = line.trim();
-
-    // TOC: ### heading with dots → linked heading
-    if (/^#{1,3}\s+[^\n]+\.{5,}/.test(trimmed)) {
-      const clean = trimmed.replace(/\*{2}/g, '');
-      const m = clean.match(/^(#{1,3})\s+(.+?)\.{5,}\s*(\d+)\s*$/);
-      if (m) {
-        fixed.push(`${m[1]} [${m[2].trim()}](#${makeSlug(m[2].trim())})`);
-        fixedCount++;
-        continue;
-      }
-    }
-
-    // TOC: plain chapter/section lines with dots
-    const tocCandidate = trimmed.replace(/^目\s+录\s*/, '');
-    if (/^(?:第[一二三四五六七八九十\d]+章|第[一二三四五六七八九十\d]+[节部篇卷])/.test(tocCandidate)) {
-      const clean = trimmed.replace(/\*{2}/g, '');
-      if (/\.{5,}\s*\d+\s*$/.test(clean)) {
-        const m = clean.match(/^(.+?)\s+\.{5,}\s*(\d+)\s*$/);
-        if (m) {
-          let title = m[1].trim();
-          title = title.replace(/^目\s+录\s*/, '');
-          fixed.push(`- [${title}](#${makeSlug(title, lang)})`);
-          fixedCount++;
-          continue;
-        }
-      }
-    }
-
-    // Fix paragraphs incorrectly marked as ## / ### / #### headings
-    if (/^#{2,4}\s+[^\n]+$/.test(line) && !line.trim().endsWith('-->')) {
-      const text = line.replace(/^#{2,4}\s+/, '');
-      const t = text.trim();
-
-      const endsWithPunctuation = /[。！？，；：、）\}\)」』》…—\-]$/.test(t);
-      const containsClausePunct = /[，；：、]/.test(t);   // mid-sentence punct → body text
-      const containsSentenceEnd = /[。！？]/.test(t);     // sentence end punct → body text
-      const isLong = t.length > 35;
-      const startsWithConjunction = /^(?:但是|然而|因此|所以|而且|不过|如果|因为|虽然|于是|接着|然后|另外|此外|当然|于是乎|事实上|基本上|换句话说|对我而言|对我来讲|就|便|却|才|又|也|还|更|只|很|非常|比较|尤其|相当|特别|无论|不论|不管|除非|只要|只有|或者|还是)/.test(t);
-      const looksLikeBodyStart = /^[一-龥]{1,2}(?:是|在|有|会|能|可以|可能|必须|需要|应该|已经|曾经|一直|没有|不是|如同|像|就像|仿佛|似乎|的|对|和|与|或|而|但|来|被|把|将|从|到|向|跟|替|除了|有关|关于|至于|对于|随着|通过|经过|根据|按照|为了)/.test(t);
-      const isFragment = /^(?:[一-龥]{1,3}|[一-龥a-zA-Z]{1,3})[。！？，；：、]/.test(t); // starts with 1-3 chars then punct → continuation
-
-      const isRealHeading = (
-        !isLong &&
-        !endsWithPunctuation &&
-        !containsClausePunct &&
-        !containsSentenceEnd &&
-        !startsWithConjunction &&
-        !looksLikeBodyStart &&
-        !isFragment &&
-        /^[#一-龥a-zA-Z0-9\s\-–—""''·，。！？：；（）【】《》「」『』、·％＋－—…]+$/.test(t) &&
-        !/\.{3,}/.test(t) &&
-        !/\d+\s*$/.test(t)
-      );
-
-      if (!isRealHeading) {
-        fixed.push(text);
-        fixedCount++;
-        continue;
-      }
-    }
-
-    fixed.push(line);
-  }
-
-  return { content: fixed.join('\n'), fixedCount, pageBreaksRemoved };
-}
-
-/**
- * Join broken lines back into paragraphs.
- * PDF converters insert a blank line between every line, so we can't use
- * blank lines to detect paragraph boundaries. Instead we use content rules:
- * a line ending with CJK sentence-ending punctuation marks a paragraph end;
- * otherwise the next line is a continuation and should be joined.
- */
-function joinParagraphs(content, lang) {
-  const sentenceEndRE = lang === 'en' ? /[.!?)"']$/ : /[。！？」』》\)]$/;
-  // Strip all blank lines first — they're artifacts from the PDF converter
-  const rawLines = content.split('\n').filter(l => l.trim() !== '');
-  const out = [];
-  let buf = '';
-  let joinedCount = 0;
-
-  const isHeading = (line) => /^#{1,4}\s/.test(line.trim());
-  const isSentenceEnd = (line) => sentenceEndRE.test(line.trim());
-
-  for (let i = 0; i < rawLines.length; i++) {
-    const line = rawLines[i];
-
-    // Headings always stand alone
-    if (isHeading(line)) {
-      if (buf) { out.push(buf.trimEnd()); buf = ''; joinedCount++; }
-      out.push(line);
-      continue;
-    }
-
-    // Accumulate body text
-    if (buf) {
-      buf += line;  // join without space (CJK text has no inter-word spaces)
-    } else {
-      buf = line;
-    }
-
-    // End of paragraph? (sentence-ending punctuation, or next line is a heading)
-    const nextIsHeading = i + 1 < rawLines.length && isHeading(rawLines[i + 1]);
-    if (isSentenceEnd(line) || nextIsHeading) {
-      out.push(buf.trimEnd());
-      buf = '';
-      if (nextIsHeading && !isSentenceEnd(line)) joinedCount++;
-    } else {
-      joinedCount++;
-    }
-  }
-  if (buf) { out.push(buf.trimEnd()); }
-
-  return { content: out.join('\n\n'), joinedCount };
-}
-
-/**
- * Remove extraneous single spaces between CJK characters.
- * PDF text extraction often inserts a space between every CJK character,
- * e.g. "我 们 对 自 己 的 身 份 认 同" → "我们对自己的身份认同".
- * Only removes spaces where both neighbors are CJK characters, preserving:
- * - English word spacing (hello world)
- * - Chinese-English spacing (AI 技术)
- * - Code blocks, tables, etc.
- */
-function removeCJKSpaces(content, lang) {
-  if (lang === 'en') return { content, removed: 0 };
-  let removed = 0;
-  // Match any CJK-range character: ideographs + punctuation + fullwidth forms
-  // U+4E00–U+9FFF  CJK Unified Ideographs  (一–鿿)
-  // U+3400–U+4DBF  CJK Extension A        (㐀–䶿)
-  // U+3000–U+303F  CJK Symbols/Punctuation (、。「」etc)
-  // U+FF00–U+FFEF  Halfwidth/Fullwidth     (，。！？etc)
-  const cjk = '[\\u4e00-\\u9fff\\u3400-\\u4dbf\\u3000-\\u303f\\uff00-\\uffef]';
-  const re = new RegExp(`(${cjk})\\s+(${cjk})`, 'g');
-  const fixed = content.replace(re, (match, a, b) => {
-    removed++;
-    return a + b;
-  });
-  return { content: fixed, removed };
-}
-
-/**
- * Fix garbled middle-dot in foreign names.
- * PDF converters often render · (U+00B7) as ? between CJK characters.
- */
-function fixMiddleDot(content, lang) {
-  if (lang === 'en') return { content, fixedCount: 0 };
-  let count = 0;
-  const fixed = content.replace(/([一-龥A-Za-z])\?\s*([一-龥A-Za-z])/g, (_, a, b) => {
-    count++;
-    return a + '·' + b;
-  });
-  return { content: fixed, fixedCount: count };
-}
-
-/**
- * Promote planet-pair topic lines to #### headings.
- * e.g. "太阳─土星 自我否定。自律。..." → "#### 太阳─土星\n\n自我否定。自律。..."
- *      "水星─金星" → "#### 水星─金星"
- *      "月亮与四交点" → "#### 月亮与四交点"
- *
- * The pattern is: [PlanetA]─[PlanetB] [optional keyword traits]
- * The planet-pair part becomes a heading, the rest stays as body text.
- */
-function promoteTopicHeadings(content, lang) {
-  if (lang === 'en') return { content, promoted: 0 };
-  const blocks = content.split('\n\n');
-  let promoted = 0;
-
-  const isHeading = (line) => /^#{1,4}\s/.test(line);
-
-  // Planet-pair prefix: 太阳─土星, 水星──冥王星, 月亮-火星, 狮子——水瓶座
-  const planetPairRE = /^([一-龥]{2,6}[─\-–—]{1,3}[一-龥]{2,8})(?:\s+(.+))?$/;
-
-  for (let i = 0; i < blocks.length; i++) {
-    const lines = blocks[i].split('\n');
-    if (lines.length !== 1) continue;
-    const line = lines[0].trim();
-    if (isHeading(line)) continue;
-
-    const m = line.match(planetPairRE);
-    if (!m) continue;
-
-    const heading = m[1];    // e.g. "太阳─土星"
-    const body    = m[2];    // e.g. "自我否定。自律。自制。..." or undefined
-
-    // Skip if the line looks like a regular sentence with just a dash
-    // e.g. "月亮和银有关——包括色彩..." is body text, not a topic
-    if (/^.{0,5}(?:有关|相关|代表|象征|意味|方面|包括|涉及|关于)/.test(body || '')) continue;
-    // Skip if the heading part is too long (likely a sentence)
-    if (heading.length > 20) continue;
-
-    if (body) {
-      blocks[i] = '#### ' + heading + '\n\n' + body;
-    } else {
-      blocks[i] = '#### ' + heading;
-    }
-    promoted++;
-  }
-
-  return { content: blocks.join('\n\n'), promoted };
+// Auto-fallback judge: empty alone isn't enough — scanned PDFs often yield
+// a few hundred chars of page numbers / headers, so we threshold on density.
+function looksScanned(markdown) {
+  const trimmed = markdown.trim();
+  if (!trimmed) return { scanned: true, wordChars: 0, pages: 0, perPage: 0 };
+  const wordChars = (trimmed.match(/[一-鿿㐀-䶿A-Za-z0-9]/g) || []).length;
+  const pageBreaks = (trimmed.match(/<!--\s*PAGE_BREAK\s*-->/g) || []).length;
+  const pages = Math.max(1, pageBreaks + 1);
+  const perPage = wordChars / pages;
+  return { scanned: wordChars < 200 || perPage < 50, wordChars, pages, perPage };
 }
 
 // ── Main pipeline ───────────────────────────────────────────────────────────
-
 try {
   const startedAt = Date.now();
 
-  // ── Step 1: Convert PDF → Markdown ──────────────────────────────────────
-  let markdown;
-  let converterUsed;
-  let convertStats;
+  // Step 1: convert
+  log(`step 1: convert (${converter})`);
+  let markdown, converterUsed, convertStats;
 
-  const runPdf2md = async () => {
-    const pdf2md = (await loadModule('./node_modules/@opendocsg/pdf2md/lib/pdf2md.js')).default;
-    const pdfBuffer = readFileSync(pdfPath);
-    const md = await pdf2md(pdfBuffer);
-    return { markdown: md, inputSize: pdfBuffer.length };
-  };
-
-  const runOcr = () => {
-    const ocrScript = resolve(__dirname, 'ocr.py');
-    const pythonBin = '/usr/bin/python3';
-    const result = execSync(`"${pythonBin}" "${ocrScript}" "${pdfPath}" chi_sim+eng`, {
-      stdio: 'pipe',
-      timeout: 600000,
-      encoding: 'utf8',
-    });
-    const parsed = JSON.parse(result.trim());
-    if (!parsed.ok) throw new Error(parsed.error || 'OCR failed');
-    return { markdown: parsed.text, inputSize: readFileSync(pdfPath).length };
-  };
-
-  // Determine which converter to use
   if (converter === 'ocr') {
-    const r = runOcr();
+    const r = runOcr(pdfPath, ocrOpts);
     markdown = r.markdown;
     converterUsed = 'ocr';
-    convertStats = { inputSize: r.inputSize, outputLength: markdown.length, lineCount: markdown.split('\n').length };
+    convertStats = statsFor(markdown, r.inputSize);
   } else if (converter === 'pdf2md') {
-    const r = await runPdf2md();
+    const r = await runPdf2md(pdfPath);
     markdown = r.markdown;
     converterUsed = 'pdf2md';
-    convertStats = { inputSize: r.inputSize, outputLength: markdown.length, lineCount: markdown.split('\n').length };
+    convertStats = statsFor(markdown, r.inputSize);
   } else {
-    // auto: try pdf2md first, fall back to OCR if empty
-    const r = await runPdf2md();
+    const r = await runPdf2md(pdfPath);
     markdown = r.markdown;
-    convertStats = { inputSize: r.inputSize, outputLength: markdown.length, lineCount: markdown.split('\n').length };
-    if (!markdown.trim()) {
-      console.error('[pipeline] pdf2md returned empty output, falling back to OCR...');
-      const r2 = runOcr();
+    convertStats = statsFor(markdown, r.inputSize);
+    const judge = looksScanned(markdown);
+    if (judge.scanned) {
+      log(`pdf2md output looks scanned (chars=${judge.wordChars}, pages~${judge.pages}, perPage~${Math.round(judge.perPage)}), falling back to OCR...`);
+      const r2 = runOcr(pdfPath, ocrOpts);
       markdown = r2.markdown;
       converterUsed = 'ocr (fallback)';
-      convertStats = { inputSize: r2.inputSize, outputLength: markdown.length, lineCount: markdown.split('\n').length };
+      convertStats = statsFor(markdown, r2.inputSize);
     } else {
       converterUsed = 'pdf2md';
     }
   }
 
+  const detectedLang = langArg === 'auto' ? detectLang(markdown) : langArg;
+  log(`detected lang: ${detectedLang}`);
 
-  // ── Determine language
-  const detectedLang = lang === 'auto' ? detectLang(markdown) : lang;
-  // ── Step 2: Fix markdown (optional) ─────────────────────────────────────
+  // Step 2a: page breaks
+  log(`step 2a: page breaks (${pageBreakStyle})`);
+  const pb = processPageBreaks(markdown, pageBreakStyle);
+  markdown = pb.content;
+  const pageBreakStats = { mode: pb.mode, removed: pb.removed, numbered: pb.numbered };
+
+  // Step 2b: heading / TOC fix
   let fixStats = null;
   if (doFix) {
-    const result = fixMarkdown(markdown, rmBreaks, detectedLang);
-    markdown = result.content;
+    log(`step 2b: fix headings + TOC${nestedToc ? ' (nested)' : ''}`);
+    const r = fixMarkdown(markdown, detectedLang, { heuristicsPath, nestedToc });
+    markdown = r.content;
     fixStats = {
       totalLines: convertStats.lineCount,
-      fixedLines: result.fixedCount,
-      pageBreaksRemoved: rmBreaks ? result.pageBreaksRemoved : 0,
+      fixedLines: r.fixedCount,
     };
   }
 
-  // Step 3: Join broken paragraphs (optional)
+  // Step 3: paragraph join
   let joinStats = null;
   if (doJoin) {
-    const result = joinParagraphs(markdown, detectedLang);
-    markdown = result.content;
-    joinStats = { linesJoined: result.joinedCount };
+    log('step 3: join paragraphs');
+    const r = joinParagraphs(markdown, detectedLang);
+    markdown = r.content;
+    joinStats = { linesJoined: r.joinedCount };
   }
 
-  // Step 4: Remove extraneous spaces between CJK characters (PDF artifact)
-  const spaceResult = removeCJKSpaces(markdown, detectedLang);
-  markdown = spaceResult.content;
-  const spaceStats = { cjkSpacesRemoved: spaceResult.removed };
+  // Step 4: CJK polish (spaces → middle-dot → topic headings)
+  log('step 4: CJK polish');
+  const space = removeCJKSpaces(markdown, detectedLang); markdown = space.content;
+  const dot   = fixMiddleDot(markdown, detectedLang);   markdown = dot.content;
+  const topic = promoteTopicHeadings(markdown, detectedLang, { heuristicsPath }); markdown = topic.content;
 
-  // Step 5: Fix garbled middle-dot (? → · in foreign names)
-  const dotResult = fixMiddleDot(markdown, detectedLang);
-  markdown = dotResult.content;
-  const dotStats = { middleDotsFixed: dotResult.fixedCount };
+  // Step 5: write (or preview, when dry-run)
+  let writtenPath = outPath;
+  let preview = null;
+  if (dryRun) {
+    log('step 5: dry-run — skipping write');
+    writtenPath = null;
+    preview = {
+      head: markdown.slice(0, 500),
+      tail: markdown.length > 1000 ? markdown.slice(-500) : '',
+      length: markdown.length,
+    };
+  } else {
+    log(`step 5: write → ${outPath}`);
+    writeFileSync(outPath, markdown, 'utf8');
+  }
 
-  // Step 6: Promote standalone topic lines to #### headings
-  const topicResult = promoteTopicHeadings(markdown, detectedLang);
-  markdown = topicResult.content;
-  const topicStats = { topicsPromoted: topicResult.promoted };
-
-  // Step 7: Write output
-  writeFileSync(outPath, markdown, 'utf8');
-
-  const ms = Date.now() - startedAt;
   console.log(JSON.stringify({
     ok: true,
     lang: detectedLang,
-    outputPath: outPath,
+    outputPath: writtenPath,
+    dryRun,
+    preview,
     converter: converterUsed,
     convert: convertStats,
+    pageBreaks: pageBreakStats,
     fix: fixStats,
     join: joinStats,
-    polish: { ...spaceStats, ...dotStats, ...topicStats },
-    durationMs: ms,
+    polish: {
+      cjkSpacesRemoved: space.removed,
+      middleDotsFixed: dot.fixedCount,
+      topicsPromoted: topic.promoted,
+    },
+    durationMs: Date.now() - startedAt,
   }));
 } catch (err) {
   console.log(JSON.stringify({ ok: false, error: err.message }));
