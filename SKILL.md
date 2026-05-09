@@ -61,12 +61,12 @@ node scripts/pipeline.js '{"pdf":"x.pdf","output":"x.md","converter":"ocr","ocrC
 ## 管道步骤
 
 ```
-convert → page breaks → fix headings → join paragraphs → remove CJK spaces → fix middle-dot → promote topics → write
+convert → page breaks → fix headings (8-layer + heading-body split) → join paragraphs → CJK polish (horizontal-whitespace-only) → write
 ```
 
-- **CJK spaces**：用 lookahead `(?<=cjk)\s+(?=cjk)` 移除中文字间空格，不影响英文词间距和中英混排。
+- **CJK spaces**：用 lookahead `(?<=cjk)[^\S\n]+(?=cjk)` 移除中文字间空格（仅水平空白，不吞换行符），不影响英文词间距和中英混排，也不会破坏段落边界。
 - **page breaks**：默认 `remove`；`number` 模式改成 `<!-- p:42 -->` 让 LLM 能引用页码；`keep` 模式原样保留。
-- **fix headings**：6 层启发式 + 外置词表（`scripts/lib/heuristics.json`）。
+- **fix headings**：8 层启发式 + 外置词表（`scripts/lib/heuristics.json`）。第 6 层新增 heading-body split：当 `###` 行过长且含正文标点时，自动拆成标题 + 正文段落。
 
 ## 安装
 
