@@ -16,11 +16,15 @@ export function detectLang(text) {
   return (total > 0 && cjkCount / total > 0.3) ? 'zh' : 'en';
 }
 
-// Remove single/multiple whitespace between CJK characters.
-// Lookbehind/lookahead so neighbors aren't consumed — otherwise (cjk)\s+(cjk)
+// Remove single/multiple horizontal whitespace between CJK characters.
+// Uses [^\\S\\n] (whitespace-except-newline) instead of \\s — newlines are
+// paragraph boundaries, not CJK inter-character spacing.  Previously \\s+
+// ate \\n\\n between a heading and the next paragraph, merging them into
+// one giant ### heading line.
+// Lookbehind/lookahead so neighbors aren't consumed — otherwise (cjk)\\s+(cjk)
 // with /g would skip every other space (the matched right-CJK becomes the
 // start point for the next search, leaving "我们 对 自己" instead of "我们对自己").
-const CJK_SPACE_RE = new RegExp(`(?<=[${CJK_ALL}])\\s+(?=[${CJK_ALL}])`, 'g');
+const CJK_SPACE_RE = new RegExp(`(?<=[${CJK_ALL}])[^\\S\\n]+(?=[${CJK_ALL}])`, 'g');
 
 export function removeCJKSpaces(content, lang) {
   if (lang === 'en') return { content, removed: 0 };

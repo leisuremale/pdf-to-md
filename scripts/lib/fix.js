@@ -114,6 +114,58 @@ function tocDepth(title) {
 
 const isHeadingMarker = line => /^#{1,4}\s/.test(line.trim());
 
+// Split a ###/##/#### line where the heading title and body text were
+// concatenated by the PDF converter.  Returns { heading, body } or null.
+//
+// Strategy: scan for the first structural break point inside the text:
+//   1. First CJK clause/sentence punctuation (，；：。！？)
+//   2. Em-dash (——)
+//   3. Length-based cutoff at ~30 CJK chars with punctuation alignment
+// Minimum heading length = 4 chars; maximum = 50 chars.
+function trySplitHeadingBody(text) {
+  // Only attempt to split long merged lines — short lines that fail the
+  // heading check are likely just sentences, not heading+body concatenations.
+  if (text.length < 60) return null;
+
+  // Find first CJK clause/sentence punctuation
+  const punctMatch = text.match(/[，；：。！？]/);
+  // Find em-dash (common transition marker in Chinese)
+  const dashMatch  = text.match(/——/);
+
+  let splitPos = -1;
+  if (punctMatch) splitPos = punctMatch.index;
+  // Prefer em-dash only if it appears earlier or no CJK punct was found
+  if (dashMatch && (splitPos < 0 || dashMatch.index < splitPos)) splitPos = dashMatch.index;
+
+  // Validate: heading must be 4-50 CJK chars
+  if (splitPos >= 4 && splitPos <= 50) {
+    const heading = text.slice(0, splitPos).trim();
+    const body = text.slice(splitPos).trim();
+    if (heading.length >= 2 && body.length >= 2) {
+      // Don't split if heading is just an em-dash attribution like "—— 作者名"
+      if (/^——\s*\S/.test(heading) && heading.length < 15) return null;
+      return { heading, body };
+    }
+  }
+
+  // Fallback: for very long merged text, cut at 30 CJK chars, aligned to
+  // the nearest punctuation or CJK character boundary.
+  if (text.length > 35) {
+    let cutoff = 30;
+    for (let i = cutoff; i < Math.min(50, text.length); i++) {
+      if (/[，；：。！？——]/.test(text[i]) || text[i] === '\n') {
+        cutoff = i;
+        break;
+      }
+    }
+    const heading = text.slice(0, cutoff).trim();
+    const body = text.slice(cutoff).trim();
+    if (heading.length >= 2 && body.length >= 2) return { heading, body };
+  }
+
+  return null;
+}
+
 export function fixMarkdown(content, lang, opts = {}) {
   const heuristics = opts.heuristics || compileHeuristics(loadHeuristics(opts.heuristicsPath));
   const { BODY_CONJUNCTION_RE, BODY_VERB_RE, BODY_FRAGMENT_RE } = heuristics;
@@ -184,7 +236,16 @@ export function fixMarkdown(content, lang, opts = {}) {
       );
 
       if (!isRealHeading) {
-        fixed.push(text);
+        // Try to split merged heading+body into ### Title + body paragraph
+        const split = trySplitHeadingBody(text);
+        if (split) {
+          const hLevel = line.match(/^(#{2,4})\s/)?.[1] || '###';
+          fixed.push(`${hLevel} ${split.heading}`);
+          fixed.push('');
+          fixed.push(split.body);
+        } else {
+          fixed.push(text); // fallback: demote entire line to body
+        }
         fixedCount++;
         continue;
       }
