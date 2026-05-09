@@ -4,9 +4,13 @@
 
 ## Why this exists
 
-Most PDF-to-Markdown tools force you through a multi-step mess: run a converter, inspect the output, manually fix broken headings, strip artifacts, chain shell commands. And when you hit a scanned PDF? Start over with a completely different tool.
+PDF-to-Markdown conversion looks like a solved problem. It's not.
 
-**pdf-to-md collapses everything into one JSON-in / JSON-out call — with automatic engine selection.**
+- **Text PDFs**: converters spew broken headings, shattered paragraphs, and phantom CJK spaces. Every `###` is suspect. Every line is on its own island.
+- **Scanned PDFs**: text converters return nothing. You need a completely different OCR stack with its own quirks — memory blowups, no caching, one bad page kills the job.
+- **The result**: you spend more time fixing than converting. Then you repeat the same manual steps every time.
+
+**pdf-to-md is different because it doesn't just extract text — it understands what it extracted and fixes it.** Heading mislabeled? Fixed. Paragraph in pieces? Joined. CJK spaces eating your document structure? Handled. Scanned PDF? Auto-detected and OCR'd in parallel with resumable caching.
 
 ```
 Before:  choose tool → convert → inspect → fix headings → strip tags → join paragraphs → done
@@ -39,17 +43,22 @@ node pipeline.js --dry-run '{"pdf":"book.pdf","output":"book.md"}'
 
 ## What makes it different
 
-|  | Typical pdf2md tools | pdf-to-md |
+Most PDF→Markdown tools do one thing: extract text. They stop there. **pdf-to-md starts where they stop** — it's a full post-processing pipeline that cleans, structures, and polishes the output until it's actually readable.
+
+|  | Typical PDF→MD tools | pdf-to-md |
 |---|---|---|
-| **Interface** | CLI args / positional params | JSON config string or `--config <file>` |
-| **Output** | Mixed stdout (logs + content) | One line of structured JSON |
-| **Scanned PDF** | Zero output / error | Auto OCR via tesseract + chi_sim, parallelized |
-| **OCR resumability** | Restart from page 1 on crash | Per-page cache survives interruption |
-| **Headings** | Body text mislabeled as `###` / `####` | 6-layer heuristic fix engine, externalized rules |
-| **Paragraphs** | Sentences shattered across lines | Auto-join: heals PDF line-break artifacts |
-| **Names** | `苏?汤普金` (garbled middle dot) | Auto-fix: `苏·汤普金` |
+| **Interface** | CLI args, positional params, shell scripting | One JSON string or `--config <file>`. Agent-native. |
+| **Output** | Mixed stdout (logs + content), needs parsing | One line of structured JSON with per-step stats |
+| **OCR** | ❌ Not supported | ✅ Auto-fallback: text extraction first, then parallel OCR |
+| **OCR resumability** | N/A | Per-page cache survives interruption. Crash mid-book? Resume. |
+| **Heading repair** | Body paragraphs mislabeled as `###` / `####` headings | 7-layer heuristic fix engine with externalized rule files |
+| **Heading–body split** | ❌ Merged into giant `###` lines | ✅ Auto-detects concatenated heading+body and splits them |
+| **Paragraph joining** | Every line is an island | Sentence-end punctuation as boundaries. 4-5K lines rejoined per book. |
+| **CJK space handling** | Spaces between every Chinese character (`我 们 对 自 己`) | Removes inter-CJK spaces — **preserving paragraph boundaries** (uses horizontal whitespace only, never eats newlines) |
+| **Foreign names** | `苏?汤普金` (garbled middle dot) | Auto-fix: `苏·汤普金` |
 | **Page citation** | Page numbers stripped | Optional `<!-- p:N -->` markers for LLM citation |
-| **LLM-friendly** | Multiple calls, fragile parsing | One call, always valid JSON |
+| **Nested TOC** | Flat, unreadable | Auto-indents by depth: 章→节→条→项 |
+| **LLM-friendly** | Multiple calls, fragile regex/grep parsing | One call. Always valid JSON. `dryRun` for preview. |
 
 ## Complete pipeline
 
@@ -85,7 +94,7 @@ Before:  我 们 对 自 己 的 身 份 认 同
 After:   我们对自己的身份认同
 ```
 
-The regex uses **lookbehind/lookahead** (`(?<=cjk)\s+(?=cjk)`) so neighbors aren't consumed during global replace — without that, only every other space gets removed.
+The regex uses **lookbehind/lookahead** (`(?<=cjk)[^\S\n]+(?=cjk)`) targeting **horizontal whitespace only** — spaces and tabs between CJK characters are removed, but **newlines are never consumed**. This is critical: `\s` would eat `\n\n` between a heading and the next paragraph, collapsing structural boundaries into one giant `###` line. On a 350-page book, this fix alone prevents **1,200+ paragraph boundary collapses**. Neighbors aren't consumed during global replace, so consecutive spaces are all removed (not just every other one).
 
 ## CLI
 
@@ -146,8 +155,9 @@ Layered heuristics to distinguish real headings from converter noise. All rules 
 3. **Conjunction gate** — lines starting with `但是/因此/所以…` are body text. Single-char particles (`只/更/又/...`) deliberately excluded — they false-positive on real titles like `只为爱` or `更高的视角`.
 4. **Sentence-pattern gate** — `XX是/在/有/会/必须/...` = body text. Pure particles (`的/对/和/与`) excluded for the same reason.
 5. **Fragment gate** — 1-3 chars then punctuation = continuation from previous line.
-6. **Middle-dot fix** — `?` between CJK chars → `·` (132 names fixed in test).
-7. **Topic promotion** — standalone planet-pair lines → `####` headings (43 promoted).
+6. **Heading–body split** — when a `###` line is too long and contains body-style punctuation, the engine doesn't just demote the whole line. It scans for the first structural break (CJK punctuation, em-dash, or length cutoff) and splits it into a clean heading + a body paragraph. Catches edge cases where PDF converters concatenate headings and body text on one line.
+7. **Middle-dot fix** — `?` between CJK chars → `·` (132 names fixed in test).
+8. **Topic promotion** — standalone planet-pair lines → `####` headings (43 promoted).
 
 ## OCR engine
 
